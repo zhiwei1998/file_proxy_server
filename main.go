@@ -215,8 +215,20 @@ func main() {
     r := mux.NewRouter()
     r.SkipClean(true)
 
-    r.HandleFunc("/", indexHandler)
+
+    // 1. 首先处理带参数的URL（优先级最高）
+    r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Query().Get("url") != "" && r.URL.Query().Get("path") != "" {
+            handleURLWithParams(w, r)
+            return
+        }
+        indexHandler(w, r) // 回退到默认处理
+    })
+
+    // 2. 其他路由处理
     r.PathPrefix("/").HandlerFunc(proxyHandler)
+
+    
 
     server := &http.Server{
         Addr:         fmt.Sprintf("%s:%d", args.Host, args.Port),
@@ -501,141 +513,99 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("欢迎使用文件代理服务器！请提供有效的文件URL。"))
 }
 
+// 专门处理带url和path参数的请求
+func handleURLWithParams(w http.ResponseWriter, r *http.Request) {
+    logDebug("处理带参数的URL请求")
+    
+    urlParam := r.URL.Query().Get("url")
+    pathParam := r.URL.Query().Get("path")
+    scParam := r.URL.Query().Get("sc")
+
+    // 清理path中的查询参数（不保留sign等参数）
+    cleanPath := strings.Split(pathParam, "?")[0]
+    
+    // 只有当提供了sc参数且path匹配时才处理
+    if scParam != "" {
+        scParam = strings.Trim(scParam, "/")
+        cleanPath = strings.Trim(cleanPath, "/")
+        
+        // 检查path是否以sc开头
+        if strings.HasPrefix(cleanPath, scParam+"/") {
+            // 匹配时才移除sc部分
+            cleanPath = cleanPath[len(scParam)+1:]
+        } else if cleanPath == scParam {
+            // 完全匹配时path置空
+            cleanPath = ""
+        }
+        // 不匹配时保持原样
+    }
+    
+    // 构建目标URL（不保留任何原始查询参数）
+    targetURL := strings.TrimRight(urlParam, "/")
+    if cleanPath != "" {
+        targetURL += "/" + cleanPath
+    }
+    
+    logInfo("转换参数: url=%s, sc=%s, path=%s", urlParam, scParam, pathParam)
+    logInfo("转换结果: %s", targetURL)
+    http.Redirect(w, r, targetURL, http.StatusFound)
+}
+
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
-	logDebug("===== 开始处理新请求 =====")
-	logDebug("原始请求方法: %s", r.Method)
-	logInfo("原始请求URL: %s", r.URL.String())
-	logDebug("原始请求头: %+v", r.Header)
+    logDebug("===== 开始处理新请求 =====")
+    logDebug("原始请求方法: %s", r.Method)
+    logInfo("原始请求URL: %s", r.URL.String())
+    logDebug("原始请求头: %+v", r.Header)
 
-	// 新增：处理包含url=和path=参数的链接
-	if r.URL.Query().Has("url") && r.URL.Query().Has("path") {
-		logDebug("检测到url和path参数")
-		targetURL, err := transformURL(r.URL.String())
-		if err != nil {
-			logError("URL转换失败: %v", err)
-			http.Error(w, fmt.Sprintf("URL转换失败: %v", err), http.StatusBadRequest)
-			return
-		}
-		logInfo("转换后的URL: %s", targetURL)
-		proxyRequest(targetURL, w, r)
-		return
-	}
+    // 原有逻辑保持不变
+    rawPath := r.URL.EscapedPath()
+    logDebug("原始编码路径: %s", rawPath)
+    
+    rawPath = strings.TrimPrefix(rawPath, "/")
+    logDebug("处理后路径: %s", rawPath)
 
-	rawPath := r.URL.EscapedPath()
-	logDebug("原始编码路径: %s", rawPath)
-	
-	rawPath = strings.TrimPrefix(rawPath, "/")
-	logDebug("处理后路径: %s", rawPath)
+    if hasSignParamStrict(r.URL.String()) {
+        logDebug("检测到Alist签名参数")
+        logDebug("原始查询参数: %s", r.URL.String())
+        
+        realURL, err := getRealURL(r.URL.String())
+        if err != nil {
+            logError("Alist签名验证失败: %v", err)
+            http.Error(w, "Alist签名验证失败", http.StatusBadRequest)
+            return
+        }
+        logInfo("从Alist获取到真实URL: %s", realURL)
+        proxyRequest(realURL, w, r)
+        return
+    }
 
-	if hasSignParamStrict(r.URL.String()) {
-		logDebug("检测到Alist签名参数")
-		logDebug("原始查询参数: %s", r.URL.String())
-		
-		realURL, err := getRealURL(r.URL.String())
-		if err != nil {
-			logError("Alist签名验证失败: %v", err)
-			http.Error(w, "Alist签名验证失败", http.StatusBadRequest)
-			return
-		}
-		logInfo("从Alist获取到真实URL: %s", realURL)
-		proxyRequest(realURL, w, r)
-		return
-	}
+    var targetURL string
 
-	var targetURL string
+    if strings.HasPrefix(rawPath, "http://") || strings.HasPrefix(rawPath, "https://") {
+        targetURL = rawPath
+        logDebug("路径已经是完整URL，直接使用: %s", targetURL)
+    } else {
+        targetURL = "https://" + rawPath
+        logDebug("路径补全为HTTPS URL: %s", targetURL)
+    }
 
-	if strings.HasPrefix(rawPath, "http://") || strings.HasPrefix(rawPath, "https://") {
-		targetURL = rawPath
-		logDebug("路径已经是完整URL，直接使用: %s", targetURL)
-	} else {
-		targetURL = "https://" + rawPath
-		logDebug("路径补全为HTTPS URL: %s", targetURL)
-	}
+    if strings.Contains(targetURL, ":///") {
+        oldURL := targetURL
+        targetURL = strings.Replace(targetURL, ":///", "://", 1)
+        logDebug("修复多余斜杠: %s → %s", oldURL, targetURL)
+    }
 
-	if strings.Contains(targetURL, ":///") {
-		oldURL := targetURL
-		targetURL = strings.Replace(targetURL, ":///", "://", 1)
-		logDebug("修复多余斜杠: %s → %s", oldURL, targetURL)
-	}
+    if !expFileURL.MatchString(targetURL) {
+        logError("URL格式验证失败: %s", targetURL)
+        http.Error(w, "无效的URL格式", http.StatusBadRequest)
+        return
+    }
+    logDebug("URL格式验证通过: %s", targetURL)
 
-	if !expFileURL.MatchString(targetURL) {
-		logError("URL格式验证失败: %s", targetURL)
-		http.Error(w, "无效的URL格式", http.StatusBadRequest)
-		return
-	}
-	logDebug("URL格式验证通过: %s", targetURL)
-
-	logDebug("准备转发请求到目标URL: %s", targetURL)
-	proxyRequest(targetURL, w, r)
+    logDebug("准备转发请求到目标URL: %s", targetURL)
+    proxyRequest(targetURL, w, r)
 }
 
-
-// 新增函数：转换URL格式
-func transformURL(originalURL string) (string, error) {
-	logDebug("开始转换URL: %s", originalURL)
-	
-	parsed, err := url.Parse(originalURL)
-	if err != nil {
-		logError("URL解析失败: %v", err)
-		return "", fmt.Errorf("解析URL失败: %w", err)
-	}
-
-	query := parsed.Query()
-	
-	// 获取url参数作为新host
-	newHost := query.Get("url")
-	if newHost == "" {
-		logError("缺少url参数")
-		return "", errors.New("缺少url参数")
-	}
-
-	// 获取path参数
-	originalPath := query.Get("path")
-	if originalPath == "" {
-		logError("缺少path参数")
-		return "", errors.New("缺少path参数")
-	}
-
-	// 获取sc参数（要移除的前缀）
-	scPrefix := query.Get("sc")
-
-	// 分离path和可能的查询参数
-	pathParts := strings.SplitN(originalPath, "?", 2)
-	cleanPath := pathParts[0] // 获取?之前的部分
-
-	// 只有当sc参数有非空值时，才处理path
-	if scPrefix != "" {
-		if strings.HasPrefix(cleanPath, "/"+scPrefix+"/") {
-			cleanPath = cleanPath[len(scPrefix)+1:] // 移除 "/od01_dy"
-		} else if strings.HasPrefix(cleanPath, scPrefix+"/") {
-			cleanPath = cleanPath[len(scPrefix):] // 处理没有前导/的情况
-		}
-	}
-
-	// 拼接新的URL
-	newURL := strings.TrimRight(newHost, "/") + cleanPath
-
-	// 确保新URL是有效的
-	if !strings.HasPrefix(newURL, "http://") && !strings.HasPrefix(newURL, "https://") {
-		newURL = "https://" + newURL // 默认补全https
-	}
-
-	// 保留原始查询参数（除了url,path,sc）
-	newQuery := url.Values{}
-	for k, v := range query {
-		if k != "url" && k != "path" && k != "sc" {
-			newQuery[k] = v
-		}
-	}
-
-	// 如果有查询参数，添加到新URL
-	if len(newQuery) > 0 {
-		newURL += "?" + newQuery.Encode()
-	}
-
-	logDebug("转换后的URL: %s", newURL)
-	return newURL, nil
-}
 
 
 func hasSignParamStrict(urlStr string) bool {
