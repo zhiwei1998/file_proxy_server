@@ -507,6 +507,20 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	logInfo("原始请求URL: %s", r.URL.String())
 	logDebug("原始请求头: %+v", r.Header)
 
+	// 新增：处理包含url=和path=参数的链接
+	if r.URL.Query().Has("url") && r.URL.Query().Has("path") {
+		logDebug("检测到url和path参数")
+		targetURL, err := transformURL(r.URL.String())
+		if err != nil {
+			logError("URL转换失败: %v", err)
+			http.Error(w, fmt.Sprintf("URL转换失败: %v", err), http.StatusBadRequest)
+			return
+		}
+		logInfo("转换后的URL: %s", targetURL)
+		proxyRequest(targetURL, w, r)
+		return
+	}
+
 	rawPath := r.URL.EscapedPath()
 	logDebug("原始编码路径: %s", rawPath)
 	
@@ -554,6 +568,75 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	logDebug("准备转发请求到目标URL: %s", targetURL)
 	proxyRequest(targetURL, w, r)
 }
+
+
+// 新增函数：转换URL格式
+func transformURL(originalURL string) (string, error) {
+	logDebug("开始转换URL: %s", originalURL)
+	
+	parsed, err := url.Parse(originalURL)
+	if err != nil {
+		logError("URL解析失败: %v", err)
+		return "", fmt.Errorf("解析URL失败: %w", err)
+	}
+
+	query := parsed.Query()
+	
+	// 获取url参数作为新host
+	newHost := query.Get("url")
+	if newHost == "" {
+		logError("缺少url参数")
+		return "", errors.New("缺少url参数")
+	}
+
+	// 获取path参数
+	originalPath := query.Get("path")
+	if originalPath == "" {
+		logError("缺少path参数")
+		return "", errors.New("缺少path参数")
+	}
+
+	// 获取sc参数（要移除的前缀）
+	scPrefix := query.Get("sc")
+
+	// 分离path和可能的查询参数
+	pathParts := strings.SplitN(originalPath, "?", 2)
+	cleanPath := pathParts[0] // 获取?之前的部分
+
+	// 只有当sc参数有非空值时，才处理path
+	if scPrefix != "" {
+		if strings.HasPrefix(cleanPath, "/"+scPrefix+"/") {
+			cleanPath = cleanPath[len(scPrefix)+1:] // 移除 "/od01_dy"
+		} else if strings.HasPrefix(cleanPath, scPrefix+"/") {
+			cleanPath = cleanPath[len(scPrefix):] // 处理没有前导/的情况
+		}
+	}
+
+	// 拼接新的URL
+	newURL := strings.TrimRight(newHost, "/") + cleanPath
+
+	// 确保新URL是有效的
+	if !strings.HasPrefix(newURL, "http://") && !strings.HasPrefix(newURL, "https://") {
+		newURL = "https://" + newURL // 默认补全https
+	}
+
+	// 保留原始查询参数（除了url,path,sc）
+	newQuery := url.Values{}
+	for k, v := range query {
+		if k != "url" && k != "path" && k != "sc" {
+			newQuery[k] = v
+		}
+	}
+
+	// 如果有查询参数，添加到新URL
+	if len(newQuery) > 0 {
+		newURL += "?" + newQuery.Encode()
+	}
+
+	logDebug("转换后的URL: %s", newURL)
+	return newURL, nil
+}
+
 
 func hasSignParamStrict(urlStr string) bool {
 	logDebug("检查签名参数: %s", urlStr)
