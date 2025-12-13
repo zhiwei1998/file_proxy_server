@@ -1,4 +1,4 @@
-module flie-proxy
+module file-proxy
 
 go 1.23.0
 
