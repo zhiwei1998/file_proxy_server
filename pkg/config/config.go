@@ -30,21 +30,23 @@ const (
 
 // Config 应用配置结构体
 type Config struct {
-	Host             string `yaml:"host"`
-	Port             int    `yaml:"port"`
-	SocksHost        string `yaml:"socks_host"`
-	SocksPort        int    `yaml:"socks_port"`
-	SocksUsername    string `yaml:"socks_username"`
-	SocksPassword    string `yaml:"socks_password"`
-	LogLevel         string `yaml:"log_level"`
-	AlistAPIURL      string `yaml:"alist_api_url"`
-	AlistToken       string `yaml:"alist_token"`
-	TestURL          string `yaml:"test_url"`
-	DefaultDNS       string `yaml:"default_dns"`
-	ProxyTimeout     int    `yaml:"proxy_timeout_seconds"`
-	EnableRedirect   bool   `yaml:"enable_redirect"`   // 是否启用302跳转
-	EnableCache      int    `yaml:"enable_cache"`      // 缓存配置，0表示禁用，其他数字表示缓存分钟数
-	InterceptKeyword string `yaml:"intercept_keyword"` // 用于拦截重定向的关键词，支持多个关键词以|分隔，为空时关闭拦截功能
+	Host                string `yaml:"host"`
+	Port                int    `yaml:"port"`
+	SocksHost           string `yaml:"socks_host"`
+	SocksPort           int    `yaml:"socks_port"`
+	SocksUsername       string `yaml:"socks_username"`
+	SocksPassword       string `yaml:"socks_password"`
+	LogLevel            string `yaml:"log_level"`
+	AlistAPIURL         string `yaml:"alist_api_url"`
+	AlistToken          string `yaml:"alist_token"`
+	TestURL             string `yaml:"test_url"`
+	DefaultDNS          string `yaml:"default_dns"`
+	ProxyTimeout        int    `yaml:"proxy_timeout_seconds"`
+	EnableRedirect      bool   `yaml:"enable_redirect"`   // 是否启用302跳转
+	EnableCache         int    `yaml:"enable_cache"`      // 缓存配置，0表示禁用，其他数字表示缓存分钟数
+	InterceptKeyword    string `yaml:"intercept_keyword"` // 用于拦截重定向的关键词，支持多个关键词以|分隔，为空时关闭拦截功能
+	DownloadConcurrency int    `yaml:"download_concurrency"` // 下载并发数，0表示禁用并发下载
+	DownloadPartSize    int    `yaml:"download_part_size"` // 下载分块大小，单位：KB，0表示使用默认值
 }
 
 // SocksProxyConfig SOCKS代理配置结构体
@@ -58,15 +60,17 @@ type SocksProxyConfig struct {
 
 // Arguments 命令行参数结构体
 type Arguments struct {
-	Host           string
-	Port           int
-	SocksHost      string
-	SocksPort      int
-	SocksUsername  string
-	SocksPassword  string
-	LogLevel       string
-	ConfigPath     string
-	GenerateConfig bool
+	Host                string
+	Port                int
+	SocksHost           string
+	SocksPort           int
+	SocksUsername       string
+	SocksPassword       string
+	LogLevel            string
+	ConfigPath          string
+	GenerateConfig      bool
+	DownloadConcurrency int
+	DownloadPartSize    int
 }
 
 // AppConfig 全局应用配置
@@ -83,9 +87,11 @@ func InitConfig() {
 		TestURL:          testURL,
 		DefaultDNS:       defaultDNS,
 		ProxyTimeout:     int(proxyTimeout.Seconds()),
-		EnableRedirect:   true, // 默认启用302跳转
-		EnableCache:      5,    // 默认缓存5分钟
-		InterceptKeyword: "",   // 默认关闭拦截功能，支持多个关键词以|分隔
+		EnableRedirect:      true, // 默认启用302跳转
+		EnableCache:         5,    // 默认缓存5分钟
+		InterceptKeyword:    "",   // 默认关闭拦截功能，支持多个关键词以|分隔
+		DownloadConcurrency: 0,    // 默认禁用并发下载
+		DownloadPartSize:    0,    // 默认使用默认分块大小
 	}
 }
 
@@ -121,6 +127,13 @@ func LoadConfig(configPath string, args *Arguments) error {
 	AppConfig.EnableRedirect = fileConfig.EnableRedirect
 	AppConfig.EnableCache = fileConfig.EnableCache
 	AppConfig.InterceptKeyword = fileConfig.InterceptKeyword
+	AppConfig.DownloadConcurrency = fileConfig.DownloadConcurrency
+	AppConfig.DownloadPartSize = fileConfig.DownloadPartSize
+
+	// 更新应用配置
+	if fileConfig.LogLevel != "" {
+		AppConfig.LogLevel = fileConfig.LogLevel
+	}
 
 	// 更新命令行参数（仅当命令行参数为默认值时）
 	if args.Host == "0.0.0.0" {
@@ -144,6 +157,14 @@ func LoadConfig(configPath string, args *Arguments) error {
 	}
 	if args.LogLevel == LogLevelInfo {
 		args.LogLevel = fileConfig.LogLevel
+	}
+	
+	// 使用命令行参数覆盖配置文件中的下载并发设置
+	if args.DownloadConcurrency > 0 {
+		AppConfig.DownloadConcurrency = args.DownloadConcurrency
+	}
+	if args.DownloadPartSize > 0 {
+		AppConfig.DownloadPartSize = args.DownloadPartSize
 	}
 
 	return nil
@@ -213,6 +234,15 @@ enable_cache: 5
 # 重定向拦截关键词，支持多个关键词以|分隔，为空时关闭拦截功能
 # 示例: 'app-free-download|app-download'
 intercept_keyword: ""
+
+# ========== 下载并发配置 ==========
+# 下载并发数，0表示禁用并发下载，10表示同时使用10个连接下载
+# 建议根据服务器带宽和目标网站限制合理设置
+# 注意：并非所有网站都支持并发下载，对于不支持的网站会自动降级为单线程下载
+download_concurrency: 0
+# 下载分块大小，单位：KB，0表示使用默认值(10MB)
+# 建议设置为10240(10MB)或更大，太小可能影响性能，太大可能导致内存占用过高
+download_part_size: 0
 `
 
 	// 写入文件
@@ -226,10 +256,10 @@ intercept_keyword: ""
 // ParseArguments 解析命令行参数
 func ParseArguments() (Arguments, error) {
 	args := Arguments{
-		Host:     "0.0.0.0",
-		Port:     8001,
-		LogLevel: LogLevelInfo,
-		// 移除默认的 ConfigPath 设置
+		Host:       "0.0.0.0",
+		Port:       8001,
+		LogLevel:   LogLevelInfo,
+		ConfigPath: "config.yaml", // 默认配置文件路径为当前目录下的config.yaml
 	}
 
 	showHelp := false
@@ -303,6 +333,32 @@ func ParseArguments() (Arguments, error) {
 			if args.ConfigPath == "" {
 				args.ConfigPath = "config.yaml"
 			}
+		case "--download-concurrency":
+			i++
+			if i >= len(os.Args) {
+				return args, errors.New("缺少下载并发数参数值")
+			}
+			concurrency, err := strconv.Atoi(os.Args[i])
+			if err != nil {
+				return args, fmt.Errorf("无效的下载并发数: %v", err)
+			}
+			if concurrency < 0 {
+				return args, fmt.Errorf("下载并发数不能为负数")
+			}
+			args.DownloadConcurrency = concurrency
+		case "--download-part-size":
+			i++
+			if i >= len(os.Args) {
+				return args, errors.New("缺少下载分块大小参数值")
+			}
+			partSize, err := strconv.Atoi(os.Args[i])
+			if err != nil {
+				return args, fmt.Errorf("无效的下载分块大小: %v", err)
+			}
+			if partSize < 0 {
+				return args, fmt.Errorf("下载分块大小不能为负数")
+			}
+			args.DownloadPartSize = partSize
 		case "--help", "-h":
 			showHelp = true
 		default:
@@ -326,22 +382,26 @@ func PrintHelp() {
   file-proxy-server [参数]
 
 参数:
-  --host string         监听主机 (默认 "0.0.0.0")
-  --port int            监听端口 (默认 8001)
-  --socks-host string   SOCKS5代理地址
-  --socks-port int      SOCKS5代理端口
-  --socks-username string SOCKS5代理用户名
-  --socks-password string SOCKS5代理密码
-  --log-level string    日志级别 (debug|info|warn|error, 默认 "info")
-  --config string       配置文件路径 (默认 "config.yaml")
-  --config-generate     生成配置文件并退出
-  --help, -h            显示帮助信息
+  --host string                监听主机 (默认 "0.0.0.0")
+  --port int                   监听端口 (默认 8001)
+  --socks-host string          SOCKS5代理地址
+  --socks-port int             SOCKS5代理端口
+  --socks-username string      SOCKS5代理用户名
+  --socks-password string      SOCKS5代理密码
+  --log-level string           日志级别 (debug|info|warn|error, 默认 "info")
+  --config string              配置文件路径 (默认 "config.yaml")
+  --config-generate            生成配置文件并退出
+  --download-concurrency int   下载并发数，0表示禁用并发下载 (默认 0)
+  --download-part-size int     下载分块大小，单位：KB，0表示使用默认值 (默认 0)
+  --help, -h                   显示帮助信息
 
 示例:
   file-proxy-server --host 0.0.0.0 --port 8080
   file-proxy-server --socks-host 127.0.0.1 --socks-port 1080 --log-level debug
   file-proxy-server --config /path/to/config.yaml
   file-proxy-server --config-generate --config custom-config.yaml
+  file-proxy-server --download-concurrency 10 --download-part-size 10240
+  file-proxy-server --config config.yaml --download-concurrency 5
 `
 	fmt.Println(helpText)
 }

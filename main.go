@@ -49,8 +49,9 @@ func main() {
 	// 加载配置
 	err = config.LoadConfig(args.ConfigPath, &args)
 	if err != nil {
-		logger.LogError("加载配置文件失败: %v", err)
-		os.Exit(1)
+		logger.LogWarn("加载配置文件失败: %v，将使用默认配置", err)
+	} else {
+		logger.LogInfo("配置文件加载成功: %s", args.ConfigPath)
 	}
 	appConfig = &config.AppConfig
 
